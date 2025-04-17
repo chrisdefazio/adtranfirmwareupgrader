@@ -38,9 +38,9 @@ pip install -r requirements.txt
 4. Create a `.env` file in the project root with your device credentials:
 ```bash
 # SSH Credentials for ADTRAN Device
-INITIAL_USERNAME=admin
-INITIAL_PASSWORD=admin
-UPGRADED_USERNAME=support
+INITIAL_USERNAME=initial_username
+INITIAL_PASSWORD=initial_password
+UPGRADED_USERNAME=new_username
 UPGRADED_PASSWORD=your_password
 ```
 
