@@ -41,7 +41,7 @@ pip install -r requirements.txt
 INITIAL_USERNAME=initial_username
 INITIAL_PASSWORD=initial_password
 UPGRADED_USERNAME=new_username
-UPGRADED_PASSWORD=your_password
+UPGRADED_PASSWORD=new_password
 ```
 
 ## Usage
