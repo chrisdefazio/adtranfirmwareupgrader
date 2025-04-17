@@ -1,6 +1,6 @@
 # ADTRAN Firmware Upgrader
 
-A Python utility for upgrading firmware on ADTRAN devices via SSH.
+A Python utility for upgrading firmware on ADTRAN devices(specifically designed for 834 v6) via SSH.
 
 ## Features
 
@@ -55,7 +55,7 @@ python adtranfirmwareupgrader.py
 
 ## Security Notes
 
-- The `.env` file contains sensitive credentials and should never be committed to version control
+- Use an `.env` file contains sensitive credentials and should never be committed to version control
 - Make sure to use strong passwords for your device
 - Keep your firmware files secure and verify their integrity before use
 
