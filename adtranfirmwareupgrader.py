@@ -237,6 +237,121 @@ def check_firmware_received(server_log):
             return True
     return False
 
+def discover_devices(network_prefix="192.168.1", start=1, end=254, timeout=1):
+    """Discover ADTRAN devices on the network by attempting SSH connections"""
+    discovered_devices = []
+    print(f"\nScanning network {network_prefix}.x for ADTRAN devices...")
+    
+    for i in range(start, end + 1):
+        ip = f"{network_prefix}.{i}"
+        print(f"Checking {ip}...", end="\r")
+        
+        # Try to connect via SSH
+        ssh_client, channel = ssh_connect_with_shell(ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'), timeout=timeout)
+        if ssh_client and channel:
+            # Verify it's an ADTRAN device by checking for specific commands
+            output = execute_ssh_command(channel, "show version")
+            if "ADTRAN" in output:
+                discovered_devices.append(ip)
+                print(f"Found ADTRAN device at {ip}")
+            ssh_client.close()
+    
+    print("\nScan complete!")
+    return discovered_devices
+
+def batch_upgrade_devices(devices, computer_ip, firmware_filename):
+    """Upgrade firmware on multiple devices"""
+    upgrade_results = {}
+    
+    for ip in devices:
+        print(f"\n===== PROCESSING DEVICE {ip} =====")
+        upgrade_results[ip] = {"status": "failed", "message": ""}
+        
+        try:
+            # Connect to device
+            ssh_client, channel = ssh_connect_with_shell(ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'))
+            if not ssh_client or not channel:
+                upgrade_results[ip]["message"] = "Failed to connect to device"
+                continue
+            
+            # Execute upgrade command
+            upgrade_url = f"http://{computer_ip}:8000/{firmware_filename}"
+            output = execute_ssh_command(channel, f"upgrade {upgrade_url}")
+            
+            # Monitor for confirmation prompt
+            if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
+                print(f"Confirmation prompt detected for {ip}. Sending 'y'...")
+                output = execute_ssh_command(channel, "y")
+                
+                # Check for second confirmation
+                if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
+                    print(f"Second confirmation prompt detected for {ip}. Sending 'y'...")
+                    output = execute_ssh_command(channel, "y")
+            
+            # Monitor the upgrade progress
+            print(f"\nStarting to monitor upgrade progress for {ip}...")
+            download_started, upgrade_complete, last_output = monitor_upgrade_progress(channel)
+            
+            if download_started:
+                print(f"✓ Firmware download was initiated for {ip}")
+            else:
+                print(f"✗ Firmware download may not have started for {ip}")
+            
+            if upgrade_complete:
+                print(f"✓ Upgrade process completed successfully for {ip}")
+                upgrade_results[ip]["status"] = "success"
+            else:
+                print(f"⚠ Upgrade completion confirmation not received for {ip}")
+                upgrade_results[ip]["message"] = "Upgrade completion not confirmed"
+            
+            # Close SSH connection as device will reboot
+            ssh_client.close()
+            
+            # Wait for device to reboot and get new IP
+            print(f"\nWaiting for device {ip} to reboot...")
+            time.sleep(60)  # Give device time to reboot
+            
+            # Try to find the new device IP
+            new_ip = None
+            for i in range(1, 255):
+                test_ip = f"172.16.192.{i}"
+                if wait_for_ping(test_ip, timeout=5):
+                    new_ip = test_ip
+                    break
+            
+            if new_ip:
+                print(f"Device {ip} has rebooted and is now at {new_ip}")
+                upgrade_results[ip]["new_ip"] = new_ip
+                
+                # Wait for services to start
+                print(f"Waiting for services to start on {new_ip}...")
+                time.sleep(30)
+                
+                # Connect to upgraded device
+                ssh_client, channel = retry_ssh_connect(new_ip, os.getenv('UPGRADED_USERNAME'), os.getenv('UPGRADED_PASSWORD'))
+                if ssh_client and channel:
+                    extract_device_info(ssh_client, channel, new_ip)
+                    ssh_client.close()
+                    upgrade_results[ip]["status"] = "success"
+                else:
+                    upgrade_results[ip]["message"] = "Failed to connect after upgrade"
+            else:
+                upgrade_results[ip]["message"] = "Could not find device after reboot"
+                
+        except Exception as e:
+            upgrade_results[ip]["message"] = f"Error during upgrade: {str(e)}"
+            print(f"Error processing device {ip}: {str(e)}")
+    
+    # Print summary of results
+    print("\n===== UPGRADE SUMMARY =====")
+    for ip, result in upgrade_results.items():
+        status = "✓ SUCCESS" if result["status"] == "success" else "✗ FAILED"
+        print(f"\nDevice {ip}: {status}")
+        if "new_ip" in result:
+            print(f"New IP: {result['new_ip']}")
+        if result["message"]:
+            print(f"Message: {result['message']}")
+
 def main():
     # Check for paramiko library
     try:
@@ -246,26 +361,114 @@ def main():
         print("pip install paramiko")
         return
     
-    # Get firmware file path
-    firmware_path = input("Enter the path to the firmware image file: ")
+    # Ask user what they want to do
+    print("\n===== ADTRAN DEVICE UTILITY =====")
+    print("1. Upgrade firmware and extract device information")
+    print("2. Extract device information only (no upgrade)")
+    print("3. Batch process multiple devices")
+    choice = input("\nSelect an option (1, 2, or 3): ")
     
-    if not os.path.exists(firmware_path):
-        print(f"Error: File {firmware_path} not found")
+    if choice not in ["1", "2", "3"]:
+        print("Invalid choice. Please select 1, 2, or 3.")
         return
     
-    # Start HTTP server for firmware hosting
-    # We'll serve from the directory containing the firmware file
-    firmware_dir = os.path.dirname(os.path.abspath(firmware_path))
-    if not firmware_dir:  # If the file is in the current directory
-        firmware_dir = os.getcwd()
+    if choice == "3":
+        # Batch processing mode
+        print("\n===== BATCH PROCESSING MODE =====")
+        print("This mode will discover and process multiple ADTRAN devices.")
+        
+        # Discover devices
+        network_prefix = input("Enter network prefix to scan (e.g., 192.168.1): ") or "192.168.1"
+        devices = discover_devices(network_prefix)
+        
+        if not devices:
+            print("No ADTRAN devices found on the network.")
+            return
+        
+        print(f"\nFound {len(devices)} ADTRAN devices:")
+        for i, ip in enumerate(devices, 1):
+            print(f"{i}. {ip}")
+        
+        # Ask what to do with the devices
+        print("\nWhat would you like to do with these devices?")
+        print("1. Extract information from all devices")
+        print("2. Upgrade firmware on all devices")
+        batch_choice = input("Select an option (1 or 2): ")
+        
+        if batch_choice == "1":
+            # Extract information from all devices
+            for ip in devices:
+                print(f"\n===== PROCESSING DEVICE {ip} =====")
+                ssh_client, channel = retry_ssh_connect(ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'))
+                if ssh_client and channel:
+                    extract_device_info(ssh_client, channel, ip)
+                    ssh_client.close()
+        elif batch_choice == "2":
+            # Get firmware file path
+            firmware_path = input("Enter the path to the firmware image file: ")
+            
+            if not os.path.exists(firmware_path):
+                print(f"Error: File {firmware_path} not found")
+                return
+            
+            # Start HTTP server for firmware hosting
+            firmware_dir = os.path.dirname(os.path.abspath(firmware_path))
+            if not firmware_dir:
+                firmware_dir = os.getcwd()
+            
+            firmware_filename = os.path.basename(firmware_path)
+            
+            print(f"\nStarting HTTP server in: {firmware_dir}")
+            print(f"Serving firmware file: {firmware_filename}")
+            
+            server_thread = SimpleHTTPServerThread(port=8000, directory=firmware_dir)
+            server_thread.start()
+            
+            # Get computer IP
+            print("\nSelect the network interface connected to the devices:")
+            interfaces = get_network_interfaces()
+            for i, (iface, ip) in enumerate(interfaces):
+                print(f"{i+1}. {iface}: {ip}")
+            
+            idx = -1
+            while idx < 0 or idx >= len(interfaces):
+                try:
+                    idx = int(input(f"Select the interface (1-{len(interfaces)}): ")) - 1
+                except ValueError:
+                    print("Please enter a valid number")
+            
+            computer_ip = interfaces[idx][1]
+            
+            # Process all devices
+            batch_upgrade_devices(devices, computer_ip, firmware_filename)
+        else:
+            print("Invalid choice.")
+            return
+        
+        print("\n===== BATCH PROCESSING COMPLETE =====")
+        return
     
-    firmware_filename = os.path.basename(firmware_path)
-    
-    print(f"\nStarting HTTP server in: {firmware_dir}")
-    print(f"Serving firmware file: {firmware_filename}")
-    
-    server_thread = SimpleHTTPServerThread(port=8000, directory=firmware_dir)
-    server_thread.start()
+    if choice == "1":
+        # Get firmware file path
+        firmware_path = input("Enter the path to the firmware image file: ")
+        
+        if not os.path.exists(firmware_path):
+            print(f"Error: File {firmware_path} not found")
+            return
+        
+        # Start HTTP server for firmware hosting
+        # We'll serve from the directory containing the firmware file
+        firmware_dir = os.path.dirname(os.path.abspath(firmware_path))
+        if not firmware_dir:  # If the file is in the current directory
+            firmware_dir = os.getcwd()
+        
+        firmware_filename = os.path.basename(firmware_path)
+        
+        print(f"\nStarting HTTP server in: {firmware_dir}")
+        print(f"Serving firmware file: {firmware_filename}")
+        
+        server_thread = SimpleHTTPServerThread(port=8000, directory=firmware_dir)
+        server_thread.start()
     
     # Display instructions for connecting the gateway
     print("\n===== STEP 1: CONNECT DEVICE =====")
@@ -298,141 +501,162 @@ def main():
     # Clear SSH key for device IP
     clear_ssh_key(device_ip)
     
-    # Connect to device via SSH and perform upgrade
-    print("\n===== STEP 3: UPGRADING FIRMWARE =====")
-    print(f"Connecting to device at {device_ip}...")
-    
-    # SSH connection with interactive shell
-    ssh_client, channel = ssh_connect_with_shell(device_ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'))
-    if not ssh_client or not channel:
-        print("Failed to connect to device. Please check the connection and try again.")
-        return
-    
-    # Execute upgrade command
-    upgrade_url = f"http://{computer_ip}:8000/{firmware_filename}"
-    output = execute_ssh_command(channel, f"upgrade {upgrade_url}")
-    
-    # Monitor for confirmation prompt
-    if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
-        print("Confirmation prompt detected. Sending 'y'...")
-        output = execute_ssh_command(channel, "y")
+    if choice == "1":
+        # Connect to device via SSH and perform upgrade
+        print("\n===== STEP 3: UPGRADING FIRMWARE =====")
+        print(f"Connecting to device at {device_ip}...")
         
-        # Check for second confirmation
+        # SSH connection with interactive shell
+        ssh_client, channel = ssh_connect_with_shell(device_ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'))
+        if not ssh_client or not channel:
+            print("Failed to connect to device. Please check the connection and try again.")
+            return
+        
+        # Execute upgrade command
+        upgrade_url = f"http://{computer_ip}:8000/{firmware_filename}"
+        output = execute_ssh_command(channel, f"upgrade {upgrade_url}")
+        
+        # Monitor for confirmation prompt
         if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
-            print("Second confirmation prompt detected. Sending 'y'...")
+            print("Confirmation prompt detected. Sending 'y'...")
             output = execute_ssh_command(channel, "y")
-    
-    # Monitor the upgrade progress
-    print("\nStarting to monitor upgrade progress...")
-    download_started, upgrade_complete, last_output = monitor_upgrade_progress(channel)
-    
-    if download_started:
-        print("✓ Firmware download was initiated")
-    else:
-        print("✗ Firmware download may not have started")
-    
-    if upgrade_complete:
-        print("✓ Upgrade process completed successfully")
-    else:
-        print("⚠ Upgrade completion confirmation not received")
-        print("The upgrade may still be in progress or may have failed.")
-    
-    # Close SSH connection as device will reboot
-    ssh_client.close()
-    
-    # Instructions for reset and reboot
-    print("\n===== STEP 4: WAIT FOR UPGRADE AND RESET =====")
-    print("The device should now be flashing the firmware and will reboot when done.")
-    print("Please monitor the device's indicator lights:")
-    print("1. Wait for the status light to blink blue/green (indicating it's ready)")
-    print("2. Then press and hold the RESET button until the blue indicator light blinks")
-    print("3. Wait for the indicator light to flash green again")
-    input("Press Enter when this process is complete...\n")
-    
-    # Prompt for new device IP
-    print("\n===== STEP 5: CONNECT TO UPGRADED DEVICE =====")
-    print("The device IP has changed. The new IP should be in the 172.16.192.x range.")
-    new_device_ip = input("Enter the new device IP address (default: 172.16.192.1): ") or "172.16.192.1"
-    
-    # Wait for device to respond
-    if wait_for_ping(new_device_ip):
-        # Give services time to start
-        print(f"\nDevice is responding to ping. Waiting 30 seconds for all services to start...")
-        time.sleep(30)
+            
+            # Check for second confirmation
+            if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
+                print("Second confirmation prompt detected. Sending 'y'...")
+                output = execute_ssh_command(channel, "y")
         
-        # Clear SSH key for new device IP
-        clear_ssh_key(new_device_ip)
+        # Monitor the upgrade progress
+        print("\nStarting to monitor upgrade progress...")
+        download_started, upgrade_complete, last_output = monitor_upgrade_progress(channel)
         
-        # Connect to upgraded device with retries
-        print(f"\nConnecting to upgraded device at {new_device_ip}...")
-        ssh_client, channel = retry_ssh_connect(new_device_ip, os.getenv('UPGRADED_USERNAME'), os.getenv('UPGRADED_PASSWORD'), max_attempts=5, retry_delay=15)
-
+        if download_started:
+            print("✓ Firmware download was initiated")
+        else:
+            print("✗ Firmware download may not have started")
+        
+        if upgrade_complete:
+            print("✓ Upgrade process completed successfully")
+        else:
+            print("⚠ Upgrade completion confirmation not received")
+            print("The upgrade may still be in progress or may have failed.")
+        
+        # Close SSH connection as device will reboot
+        ssh_client.close()
+        
+        # Instructions for reset and reboot
+        print("\n===== STEP 4: WAIT FOR UPGRADE AND RESET =====")
+        print("The device should now be flashing the firmware and will reboot when done.")
+        print("Please monitor the device's indicator lights:")
+        print("1. Wait for the status light to blink blue/green (indicating it's ready)")
+        print("2. Then press and hold the RESET button until the blue indicator light blinks")
+        print("3. Wait for the indicator light to flash green again")
+        input("Press Enter when this process is complete...\n")
+        
+        # Prompt for new device IP
+        print("\n===== STEP 5: CONNECT TO UPGRADED DEVICE =====")
+        print("The device IP has changed. The new IP should be in the 172.16.192.x range.")
+        new_device_ip = input("Enter the new device IP address (default: 172.16.192.1): ") or "172.16.192.1"
+        
+        # Wait for device to respond
+        if wait_for_ping(new_device_ip):
+            # Give services time to start
+            print(f"\nDevice is responding to ping. Waiting 30 seconds for all services to start...")
+            time.sleep(30)
+            
+            # Clear SSH key for new device IP
+            clear_ssh_key(new_device_ip)
+            
+            # Connect to upgraded device with retries
+            print(f"\nConnecting to upgraded device at {new_device_ip}...")
+            ssh_client, channel = retry_ssh_connect(new_device_ip, os.getenv('UPGRADED_USERNAME'), os.getenv('UPGRADED_PASSWORD'), max_attempts=5, retry_delay=15)
+            
+            if ssh_client and channel:
+                extract_device_info(ssh_client, channel, new_device_ip)
+                ssh_client.close()
+            
+            # Final instructions for web configuration
+            print("\n===== STEP 6: COMPLETE SETUP VIA WEB GUI =====")
+            print(f"Open a web browser and navigate to: http://{new_device_ip}")
+            print("Set Intellifi mode to 'Mesh Controller'")
+            print("Login and confirm the router is working as expected")
+        else:
+            print(f"Unable to reach device at {new_device_ip}. Please check the connection and try again.")
+    else:
+        # Just extract device information
+        print("\n===== EXTRACTING DEVICE INFORMATION =====")
+        print(f"Connecting to device at {device_ip}...")
+        
+        # Connect to device with retries
+        ssh_client, channel = retry_ssh_connect(device_ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'), max_attempts=5, retry_delay=15)
+        
         if ssh_client and channel:
-            # Get WiFi configuration
-            print("\nRetrieving WiFi configuration...")
-            wifi_output = execute_ssh_command(channel, "show wifi config")
-            
-            # Extract WiFi SSID and password
-            ssid = ""
-            wifi_key = ""
-            if wifi_output:
-                for line in wifi_output.split('\n'):
-                    if "wireless.i5g.ssid" in line:
-                        ssid = line.split("=")[1].strip().strip("'")
-                    if "wireless.i5g.key" in line:
-                        wifi_key = line.split("=")[1].strip().strip("'")
-            
-            if ssid and wifi_key:
-                print("\n===== WIFI CONFIGURATION =====")
-                print(f"SSID: {ssid}")
-                print(f"Password: {wifi_key}")
-            
-            # Get device info
-            print("\nRetrieving device information...")
-            mfg_output = execute_ssh_command(channel, "show mfg")
-            
-            # Extract serial and MAC
-            serial = ""
-            mac = ""
-            if mfg_output:
-                for line in mfg_output.split('\n'):
-                    if "MFG_SERIAL" in line:
-                        serial = line.split("=")[1].strip()
-                    if "MFG_MAC" in line:
-                        mac = line.split("=")[1].strip()
-            
-            if serial and mac:
-                print("\n===== DEVICE INFORMATION =====")
-                print(f"Serial Number: {serial}")
-                print(f"MAC Address: {mac}")
-            
-            # Save the information to a file
-            device_info_file = f"device_info_{new_device_ip.replace('.', '_')}.txt"
-            try:
-                with open(device_info_file, 'w') as f:
-                    f.write(f"Device IP: {new_device_ip}\n")
-                    f.write(f"WiFi SSID: {ssid}\n")
-                    f.write(f"WiFi Password: {wifi_key}\n")
-                    f.write(f"Serial Number: {serial}\n")
-                    f.write(f"MAC Address: {mac}\n")
-                print(f"\nDevice information saved to {device_info_file}")
-            except Exception as e:
-                print(f"Error saving device information: {e}")
-            
-            # Close SSH connection
+            extract_device_info(ssh_client, channel, device_ip)
             ssh_client.close()
-        
-        # Final instructions for web configuration
-        print("\n===== STEP 6: COMPLETE SETUP VIA WEB GUI =====")
-        print(f"Open a web browser and navigate to: http://{new_device_ip}")
-        print("Set Intellifi mode to 'Mesh Controller'")
-        print("Login and confirm the router is working as expected")
-    else:
-        print(f"Unable to reach device at {new_device_ip}. Please check the connection and try again.")
+        else:
+            print("Failed to connect to device. Please check the connection and try again.")
     
-    print("\n===== SETUP COMPLETE =====")
-    print("The device has been successfully upgraded and configured.")
-    print("\nThe HTTP server is still running. Press Ctrl+C to exit the program when you're finished.")
+    print("\n===== OPERATION COMPLETE =====")
+    if choice == "1":
+        print("The device has been successfully upgraded and configured.")
+    else:
+        print("Device information has been successfully extracted.")
+    
+    if choice == "1":
+        print("\nThe HTTP server is still running. Press Ctrl+C to exit the program when you're finished.")
+
+def extract_device_info(ssh_client, channel, device_ip):
+    """Extract and save device information"""
+    # Get WiFi configuration
+    print("\nRetrieving WiFi configuration...")
+    wifi_output = execute_ssh_command(channel, "show wifi config")
+    
+    # Extract WiFi SSID and password
+    ssid = ""
+    wifi_key = ""
+    if wifi_output:
+        for line in wifi_output.split('\n'):
+            if "wireless.i5g.ssid" in line:
+                ssid = line.split("=")[1].strip().strip("'")
+            if "wireless.i5g.key" in line:
+                wifi_key = line.split("=")[1].strip().strip("'")
+    
+    if ssid and wifi_key:
+        print("\n===== WIFI CONFIGURATION =====")
+        print(f"SSID: {ssid}")
+        print(f"Password: {wifi_key}")
+    
+    # Get device info
+    print("\nRetrieving device information...")
+    mfg_output = execute_ssh_command(channel, "show mfg")
+    
+    # Extract serial and MAC
+    serial = ""
+    mac = ""
+    if mfg_output:
+        for line in mfg_output.split('\n'):
+            if "MFG_SERIAL" in line:
+                serial = line.split("=")[1].strip()
+            if "MFG_MAC" in line:
+                mac = line.split("=")[1].strip()
+    
+    if serial and mac:
+        print("\n===== DEVICE INFORMATION =====")
+        print(f"Serial Number: {serial}")
+        print(f"MAC Address: {mac}")
+    
+    # Save the information to a file
+    device_info_file = f"device_info_{device_ip.replace('.', '_')}.txt"
+    try:
+        with open(device_info_file, 'w') as f:
+            f.write(f"Device IP: {device_ip}\n")
+            f.write(f"WiFi SSID: {ssid}\n")
+            f.write(f"WiFi Password: {wifi_key}\n")
+            f.write(f"Serial Number: {serial}\n")
+            f.write(f"MAC Address: {mac}\n")
+        print(f"\nDevice information saved to {device_info_file}")
+    except Exception as e:
+        print(f"Error saving device information: {e}")
 
 if __name__ == "__main__":
     try:
