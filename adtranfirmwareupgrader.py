@@ -352,6 +352,112 @@ def batch_upgrade_devices(devices, computer_ip, firmware_filename):
         if result["message"]:
             print(f"Message: {result['message']}")
 
+def upgrade_adtran_device(device_ip, computer_ip, firmware_path, credentials):
+    """Main function to upgrade an ADTRAN device"""
+    # Start HTTP server for firmware hosting
+    firmware_dir = os.path.dirname(os.path.abspath(firmware_path))
+    if not firmware_dir:
+        firmware_dir = os.getcwd()
+    
+    firmware_filename = os.path.basename(firmware_path)
+    
+    print(f"\nStarting HTTP server in: {firmware_dir}")
+    print(f"Serving firmware file: {firmware_filename}")
+    
+    server_thread = SimpleHTTPServerThread(port=8000, directory=firmware_dir)
+    server_thread.start()
+    
+    # Connect to device via SSH and perform upgrade
+    print("\n===== UPGRADING FIRMWARE =====")
+    print(f"Connecting to device at {device_ip}...")
+    
+    # SSH connection with interactive shell
+    ssh_client, channel = ssh_connect_with_shell(
+        device_ip,
+        credentials['initial']['username'],
+        credentials['initial']['password']
+    )
+    if not ssh_client or not channel:
+        print("Failed to connect to device. Please check the connection and try again.")
+        return
+    
+    # Execute upgrade command
+    upgrade_url = f"http://{computer_ip}:8000/{firmware_filename}"
+    output = execute_ssh_command(channel, f"upgrade {upgrade_url}")
+    
+    # Monitor for confirmation prompt
+    if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
+        print("Confirmation prompt detected. Sending 'y'...")
+        output = execute_ssh_command(channel, "y")
+        
+        # Check for second confirmation
+        if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
+            print("Second confirmation prompt detected. Sending 'y'...")
+            output = execute_ssh_command(channel, "y")
+    
+    # Monitor the upgrade progress
+    print("\nStarting to monitor upgrade progress...")
+    download_started, upgrade_complete, last_output = monitor_upgrade_progress(channel)
+    
+    if download_started:
+        print("✓ Firmware download was initiated")
+    else:
+        print("✗ Firmware download may not have started")
+    
+    if upgrade_complete:
+        print("✓ Upgrade process completed successfully")
+    else:
+        print("⚠ Upgrade completion confirmation not received")
+        print("The upgrade may still be in progress or may have failed.")
+    
+    # Close SSH connection as device will reboot
+    ssh_client.close()
+    
+    # Instructions for reset and reboot
+    print("\n===== WAIT FOR UPGRADE AND RESET =====")
+    print("The device should now be flashing the firmware and will reboot when done.")
+    print("Please monitor the device's indicator lights:")
+    print("1. Wait for the status light to blink blue/green (indicating it's ready)")
+    print("2. Then press and hold the RESET button until the blue indicator light blinks")
+    print("3. Wait for the indicator light to flash green again")
+    input("Press Enter when this process is complete...\n")
+    
+    # Prompt for new device IP
+    print("\n===== CONNECT TO UPGRADED DEVICE =====")
+    print("The device IP has changed. The new IP should be in the 172.16.192.x range.")
+    new_device_ip = input("Enter the new device IP address (default: 172.16.192.1): ") or "172.16.192.1"
+    
+    # Wait for device to respond
+    if wait_for_ping(new_device_ip):
+        # Give services time to start
+        print(f"\nDevice is responding to ping. Waiting 30 seconds for all services to start...")
+        time.sleep(30)
+        
+        # Clear SSH key for new device IP
+        clear_ssh_key(new_device_ip)
+        
+        # Connect to upgraded device with retries
+        print(f"\nConnecting to upgraded device at {new_device_ip}...")
+        ssh_client, channel = retry_ssh_connect(
+            new_device_ip,
+            credentials['upgraded']['username'],
+            credentials['upgraded']['password'],
+            max_attempts=5,
+            retry_delay=15
+        )
+        
+        if ssh_client and channel:
+            extract_device_info(ssh_client, channel, new_device_ip)
+            ssh_client.close()
+        
+        # Final instructions for web configuration
+        print("\n===== COMPLETE SETUP VIA WEB GUI =====")
+        print(f"Open a web browser and navigate to: http://{new_device_ip}")
+        print("Set Intellifi mode to 'Mesh Controller'")
+        print("Login and confirm the router is working as expected")
+    else:
+        print(f"Unable to reach device at {new_device_ip}. Please check the connection and try again.")
+
 def main():
     # Check for paramiko library
     try:

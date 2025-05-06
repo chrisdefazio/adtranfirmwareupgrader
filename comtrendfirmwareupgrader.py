@@ -184,6 +184,82 @@ def execute_ssh_command(channel, command, wait_time=5, max_output_wait=30):
     
     return output_str
 
+def upgrade_comtrend_device(device_ip, computer_ip, firmware_path, credentials):
+    """Main function to upgrade a Comtrend device"""
+    # Start TFTP server
+    firmware_dir = os.path.dirname(os.path.abspath(firmware_path))
+    if not firmware_dir:
+        firmware_dir = os.getcwd()
+    
+    firmware_filename = os.path.basename(firmware_path)
+    
+    print(f"\nStarting TFTP server in: {firmware_dir}")
+    print(f"Serving firmware file: {firmware_filename}")
+    
+    # Start TFTP server in a separate thread
+    import threading
+    tftp_thread = threading.Thread(
+        target=setup_tftp_server,
+        args=(firmware_dir,),
+        daemon=True
+    )
+    tftp_thread.start()
+    
+    # Connect to device
+    print("\n===== UPGRADING FIRMWARE =====")
+    print(f"Connecting to device at {device_ip}...")
+    
+    ssh_client, channel = ssh_connect_with_shell(
+        device_ip,
+        credentials['initial']['username'],
+        credentials['initial']['password']
+    )
+    if not ssh_client or not channel:
+        print("Failed to connect to device. Please check the connection and try again.")
+        return
+    
+    # Execute TFTP upgrade command
+    upgrade_cmd = f"tftp -g -t i -f {firmware_filename} {computer_ip}"
+    print(f"\nExecuting upgrade command: {upgrade_cmd}")
+    output = execute_ssh_command(channel, upgrade_cmd)
+    
+    # Wait for upgrade to complete
+    print("\nWaiting for firmware upgrade to complete...")
+    time.sleep(60)  # Adjust this time based on your device's upgrade duration
+    
+    # Restore defaults
+    print("\n===== RESTORING DEFAULTS =====")
+    output = execute_ssh_command(channel, "restoredefault")
+    
+    # Close SSH connection as device will reboot
+    ssh_client.close()
+    
+    # Wait for reboot and reconnect
+    print("\n===== WAITING FOR REBOOT =====")
+    print("Device is rebooting. This may take a few minutes...")
+    time.sleep(120)  # Wait for device to reboot
+    
+    if not wait_for_ping(device_ip):
+        print(f"Unable to reach device at {device_ip} after reboot.")
+        return
+    
+    # Connect with new credentials
+    print("\n===== CONNECTING WITH NEW CREDENTIALS =====")
+    ssh_client, channel = ssh_connect_with_shell(
+        device_ip,
+        credentials['upgraded']['username'],
+        credentials['upgraded']['password']
+    )
+    if not ssh_client or not channel:
+        print("Failed to connect with new credentials. Please check the connection and try again.")
+        return
+    
+    print("\n===== UPGRADE COMPLETE =====")
+    print("The device has been successfully upgraded and restored to factory defaults.")
+    print("You can now configure the device as needed.")
+    
+    ssh_client.close()
+
 def main():
     print("\n===== COMTREND FIRMWARE UPGRADE UTILITY =====")
     
