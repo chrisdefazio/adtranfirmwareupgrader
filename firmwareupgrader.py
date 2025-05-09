@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Unified firmware upgrader for network devices.
-Supports multiple device types and provides a guided upgrade experience.
+Main firmware upgrader script that provides a unified interface for upgrading firmware on different devices.
 """
 
 import os
 import sys
 import time
 from typing import Dict, Any, Optional, Type
-from devices.base import DeviceUpgrader
-from devices.adtran import ADTRANUpgrader
-from devices.comtrend import ComtrendUpgrader
-from utils import get_network_interfaces
+from firmware_upgrader.devices import DeviceUpgrader, ADTRANUpgrader, ComtrendUpgrader
+from firmware_upgrader.utils import get_network_interfaces
 
 class FirmwareUpgrader:
     """Main firmware upgrader class."""

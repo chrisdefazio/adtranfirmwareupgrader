@@ -1,0 +1,3 @@
+cat /etc/config/*
+sshd:119.535:error:processInput:429:unrecognized command cat /etc/config/*
+ > 

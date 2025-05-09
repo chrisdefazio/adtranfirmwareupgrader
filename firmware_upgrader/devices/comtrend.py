@@ -1,12 +1,12 @@
 """
-ADTRAN device firmware upgrader implementation.
+Comtrend device firmware upgrader implementation.
 """
 
 import os
 import time
 from typing import Dict, Any, Optional, Tuple
 from .base import DeviceUpgrader
-from ..utils import (
+from firmware_upgrader.utils import (
     wait_for_ping,
     ssh_connect_with_shell,
     execute_ssh_command,
@@ -14,11 +14,11 @@ from ..utils import (
     extract_device_info
 )
 
-class ADTRANUpgrader(DeviceUpgrader):
-    """ADTRAN device firmware upgrader."""
+class ComtrendUpgrader(DeviceUpgrader):
+    """Comtrend device firmware upgrader."""
     
     def __init__(self, device_ip: str, username: str = "admin", password: str = "admin"):
-        """Initialize ADTRAN upgrader.
+        """Initialize Comtrend upgrader.
         
         Args:
             device_ip: IP address of the device
@@ -28,7 +28,7 @@ class ADTRANUpgrader(DeviceUpgrader):
         super().__init__(device_ip, username, password)
     
     def connect(self) -> bool:
-        """Connect to the ADTRAN device.
+        """Connect to the Comtrend device.
         
         Returns:
             bool: True if connection successful, False otherwise
@@ -47,14 +47,14 @@ class ADTRANUpgrader(DeviceUpgrader):
         return self.ssh_client is not None and self.channel is not None
     
     def disconnect(self) -> None:
-        """Disconnect from the ADTRAN device."""
+        """Disconnect from the Comtrend device."""
         if self.ssh_client:
             self.ssh_client.close()
             self.ssh_client = None
             self.channel = None
     
     def get_device_info(self) -> Dict[str, Any]:
-        """Get ADTRAN device information.
+        """Get Comtrend device information.
         
         Returns:
             Dict containing device information
@@ -66,24 +66,29 @@ class ADTRANUpgrader(DeviceUpgrader):
         info = {}
         
         # Get model info
-        model_output = execute_ssh_command(self.channel, "show version")
+        model_output = execute_ssh_command(self.channel, "cat /proc/cmdline")
         if model_output:
             for line in model_output.split('\n'):
-                if "Model" in line:
-                    info['model'] = line.split(":")[1].strip()
-                elif "Serial" in line:
-                    info['serial'] = line.split(":")[1].strip()
-                elif "MAC" in line:
-                    info['mac'] = line.split(":")[1].strip()
+                if "model" in line.lower():
+                    info['model'] = line.split("model=")[1].split()[0]
+        
+        # Get serial and MAC
+        mfg_output = execute_ssh_command(self.channel, "cat /proc/mfg")
+        if mfg_output:
+            for line in mfg_output.split('\n'):
+                if "MFG_SERIAL" in line:
+                    info['serial'] = line.split("=")[1].strip()
+                if "MFG_MAC" in line:
+                    info['mac'] = line.split("=")[1].strip()
         
         # Get WiFi info
-        wifi_output = execute_ssh_command(self.channel, "show wifi config")
+        wifi_output = execute_ssh_command(self.channel, "cat /etc/config/wireless")
         if wifi_output:
             for line in wifi_output.split('\n'):
-                if "wireless.i5g.ssid" in line:
-                    info['ssid'] = line.split("=")[1].strip().strip("'")
-                if "wireless.i5g.key" in line:
-                    info['wifi_password'] = line.split("=")[1].strip().strip("'")
+                if "option ssid" in line:
+                    info['ssid'] = line.split("'")[1]
+                if "option key" in line:
+                    info['wifi_password'] = line.split("'")[1]
         
         return info
     
@@ -96,16 +101,14 @@ class ADTRANUpgrader(DeviceUpgrader):
         if not self.channel:
             return ""
         
-        output = execute_ssh_command(self.channel, "show version")
+        output = execute_ssh_command(self.channel, "cat /etc/version")
         if output:
-            for line in output.split('\n'):
-                if "Firmware" in line:
-                    return line.split(":")[1].strip()
+            return output.strip()
         
         return ""
     
     def upgrade_firmware(self, firmware_path: str) -> bool:
-        """Upgrade ADTRAN device firmware.
+        """Upgrade Comtrend device firmware.
         
         Args:
             firmware_path: Path to firmware file
@@ -127,7 +130,7 @@ class ADTRANUpgrader(DeviceUpgrader):
         
         # Start firmware upgrade
         print(f"\nStarting firmware upgrade with file: {firmware_path}")
-        upgrade_cmd = f"upgrade firmware {firmware_path}"
+        upgrade_cmd = f"sysupgrade {firmware_path}"
         execute_ssh_command(self.channel, upgrade_cmd)
         
         # Monitor upgrade progress
@@ -177,7 +180,7 @@ class ADTRANUpgrader(DeviceUpgrader):
             return False
         
         # Check if device is responsive
-        output = execute_ssh_command(self.channel, "show version")
+        output = execute_ssh_command(self.channel, "cat /etc/version")
         if not output:
             return False
         
@@ -188,7 +191,7 @@ class ADTRANUpgrader(DeviceUpgrader):
         return True
     
     def backup_config(self) -> Optional[str]:
-        """Backup ADTRAN device configuration.
+        """Backup Comtrend device configuration.
         
         Returns:
             Optional[str]: Path to backup file if successful, None otherwise
@@ -202,10 +205,10 @@ class ADTRANUpgrader(DeviceUpgrader):
         
         # Generate backup filename
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        backup_file = os.path.join(backup_dir, f"adtran_config_{self.device_ip.replace('.', '_')}_{timestamp}.txt")
+        backup_file = os.path.join(backup_dir, f"comtrend_config_{self.device_ip.replace('.', '_')}_{timestamp}.txt")
         
         # Get configuration
-        config_output = execute_ssh_command(self.channel, "show config")
+        config_output = execute_ssh_command(self.channel, "cat /etc/config/*")
         if not config_output:
             return None
         
@@ -220,7 +223,7 @@ class ADTRANUpgrader(DeviceUpgrader):
             return None
     
     def restore_config(self, backup_path: str) -> bool:
-        """Restore ADTRAN device configuration from backup.
+        """Restore Comtrend device configuration from backup.
         
         Args:
             backup_path: Path to backup file
@@ -245,15 +248,31 @@ class ADTRANUpgrader(DeviceUpgrader):
         
         # Restore configuration
         print("\nRestoring configuration...")
-        execute_ssh_command(self.channel, "configure terminal")
         
-        # Split config into lines and apply each command
+        # Split config into sections and apply each section
+        current_section = None
+        section_content = []
+        
         for line in config.split('\n'):
-            if line.strip() and not line.startswith('!'):
-                execute_ssh_command(self.channel, line.strip())
+            if line.startswith('config '):
+                # Apply previous section if exists
+                if current_section and section_content:
+                    section_cmd = f"uci set {current_section}='{''.join(section_content)}'"
+                    execute_ssh_command(self.channel, section_cmd)
+                
+                # Start new section
+                current_section = line.strip()
+                section_content = []
+            else:
+                section_content.append(line)
         
-        # Save configuration
-        execute_ssh_command(self.channel, "write memory")
+        # Apply last section
+        if current_section and section_content:
+            section_cmd = f"uci set {current_section}='{''.join(section_content)}'"
+            execute_ssh_command(self.channel, section_cmd)
+        
+        # Commit changes
+        execute_ssh_command(self.channel, "uci commit")
         
         return True
     
