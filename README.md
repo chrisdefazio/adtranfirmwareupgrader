@@ -59,10 +59,6 @@ python adtranfirmwareupgrader.py
 - Make sure to use strong passwords for your device
 - Keep your firmware files secure and verify their integrity before use
 
-## License
-
-[Your chosen license]
-
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request. 
