@@ -1,6 +1,12 @@
-# ADTRAN Firmware Upgrader
+# Modem / Router Firmware Upgrader
 
-A Python utility for upgrading firmware on ADTRAN devices(specifically designed for 834 v6) via SSH.
+A Python utility for upgrading firmware on a variety of devices used by ISPs and other network providers.
+
+Currently supported devices:
+- ADTRAN 834 v6
+- ADTRAN 834 v5
+- COMTREND VR3071
+- COMTREND VR3071v2
 
 ## Features
 
@@ -14,14 +20,14 @@ A Python utility for upgrading firmware on ADTRAN devices(specifically designed 
 
 - Python 3.9 or higher
 - pip (Python package installer)
-- SSH access to the ADTRAN device
+- SSH access to the devices you want to upgrade or extract information from
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/adtranfirmwareupgrader.git
-cd adtranfirmwareupgrader
+git clone https://github.com/chrisdefazio/firmware-flasher.git
+cd firmware-flasher
 ```
 
 2. Create and activate a virtual environment:
