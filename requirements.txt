@@ -1,3 +1,4 @@
 paramiko==3.5.1
 python-dotenv==1.1.0
-tftpy==0.8.5 
+tftpy==0.8.5
+simple-term-menu==1.6.1 
