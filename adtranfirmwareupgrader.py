@@ -380,7 +380,7 @@ def batch_upgrade_devices(devices, computer_ip, firmware_filename):
                 # Connect to upgraded device
                 ssh_client, channel = retry_ssh_connect(new_ip)
                 if ssh_client and channel:
-                    extract_device_info(ssh_client, channel, new_ip)
+                    extract_device_info(ssh_client, channel, new_ip, operation_type="Upgrade")
                     ssh_client.close()
                     upgrade_results[ip]["status"] = "success"
                 else:
@@ -451,7 +451,7 @@ def main():
                 print(f"\n===== PROCESSING DEVICE {ip} =====")
                 ssh_client, channel = retry_ssh_connect(ip)
                 if ssh_client and channel:
-                    extract_device_info(ssh_client, channel, ip)
+                    extract_device_info(ssh_client, channel, ip, operation_type="Info Only")
                     ssh_client.close()
         elif batch_choice == "2":
             # Get firmware file path
@@ -632,7 +632,7 @@ def main():
             ssh_client, channel = retry_ssh_connect(new_device_ip)
             
             if ssh_client and channel:
-                extract_device_info(ssh_client, channel, new_device_ip)
+                extract_device_info(ssh_client, channel, new_device_ip, operation_type="Upgrade")
                 ssh_client.close()
             
             # Final instructions for web configuration
@@ -651,7 +651,7 @@ def main():
         ssh_client, channel = retry_ssh_connect(device_ip, max_attempts=5, retry_delay=15)
         
         if ssh_client and channel:
-            extract_device_info(ssh_client, channel, device_ip)
+            extract_device_info(ssh_client, channel, device_ip, operation_type="Info Only")
             ssh_client.close()
         else:
             print("Failed to connect to device. Please check the connection and try again.")
@@ -665,7 +665,7 @@ def main():
     if choice == "1":
         print("\nThe HTTP server is still running. Press Ctrl+C to exit the program when you're finished.")
 
-def extract_device_info(ssh_client, channel, device_ip):
+def extract_device_info(ssh_client, channel, device_ip, operation_type="Info Only"):
     """Extract and save device information"""
     # Get WiFi configuration
     print("\nRetrieving WiFi configuration...")
@@ -730,7 +730,6 @@ def extract_device_info(ssh_client, channel, device_ip):
             
             # Write device information
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            operation_type = "Upgrade" if "upgrade" in sys.argv else "Info Only"
             writer.writerow([timestamp, device_ip, ssid, wifi_key, serial, mac, firmware_version, operation_type])
             
         print(f"\nDevice information appended to {csv_file}")
