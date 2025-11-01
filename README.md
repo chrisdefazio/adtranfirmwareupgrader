@@ -46,23 +46,9 @@ UPGRADED_PASSWORD=new_password
 
 ## Usage
 
-1. Place your firmware image file in the project directory
+1. Place your firmware image files in the firmware_images directory
 2. Run the script:
 ```bash
-python adtranfirmwareupgrader.py
+python main.py
 ```
-3. Follow the on-screen instructions to complete the upgrade process
-
-## Security Notes
-
-- Use an `.env` file contains sensitive credentials and should never be committed to version control
-- Make sure to use strong passwords for your device
-- Keep your firmware files secure and verify their integrity before use
-
-## License
-
-[Your chosen license]
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. 
+3. Follow the on-screen instructions to complete the firmware upgrade process or extract device information

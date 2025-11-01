@@ -10,6 +10,7 @@ import getpass
 import platform
 import subprocess
 from dotenv import load_dotenv
+from simple_term_menu import TerminalMenu
 
 # Load environment variables from .env file
 load_dotenv()
@@ -197,7 +198,51 @@ def main():
     
     # Step 2: Get firmware file
     print("\n===== STEP 2: SELECT FIRMWARE =====")
-    firmware_path = input("Enter the path to the firmware image file: ")
+    
+    # Offer two options for firmware selection
+    selection_options = ["Select from firmware_images directory", "Enter custom file path"]
+    selection_menu = TerminalMenu(selection_options, title="Choose firmware source:")
+    selection_index = selection_menu.show()
+    
+    if selection_index is None:
+        print("Firmware selection cancelled.")
+        return
+    
+    firmware_path = None
+    
+    if selection_index == 0:
+        # Select from firmware_images directory
+        firmware_images_dir = "firmware_images"
+        
+        if not os.path.exists(firmware_images_dir):
+            print(f"Error: {firmware_images_dir} directory not found")
+            return
+        
+        # Get list of firmware files
+        firmware_files = [f for f in os.listdir(firmware_images_dir) 
+                         if os.path.isfile(os.path.join(firmware_images_dir, f))]
+        
+        if not firmware_files:
+            print(f"Error: No firmware files found in {firmware_images_dir} directory")
+            return
+        
+        # Display menu for firmware selection
+        print(f"\nSelect a firmware file from {firmware_images_dir}:")
+        firmware_menu = TerminalMenu(firmware_files, title="")
+        firmware_index = firmware_menu.show()
+        
+        if firmware_index is None:
+            print("Firmware selection cancelled.")
+            return
+        
+        firmware_filename = firmware_files[firmware_index]
+        firmware_path = os.path.join(firmware_images_dir, firmware_filename)
+    else:
+        # Enter custom file path
+        firmware_path = input("\nEnter the path to the firmware image file: ")
+        if not firmware_path:
+            print("No file path entered.")
+            return
     
     if not os.path.exists(firmware_path):
         print(f"Error: File {firmware_path} not found")
