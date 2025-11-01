@@ -11,6 +11,8 @@ import getpass
 import sys
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from dotenv import load_dotenv
+import csv
+from datetime import datetime
 
 # Load environment variables from .env file
 load_dotenv()
@@ -97,9 +99,22 @@ def wait_for_ping(ip, timeout=300, interval=5):
     print(f"Timeout waiting for device {ip} to respond to ping")
     return False
 
-def ssh_connect_with_shell(ip, username, password, timeout=10):
+def get_ssh_credentials(ip):
+    """Determine which SSH credentials to use based on IP address"""
+    if ip.startswith("172.16.192."):
+        print("Using upgraded firmware credentials (172.16.192.x IP range)")
+        return os.getenv('UPGRADED_USERNAME'), os.getenv('UPGRADED_PASSWORD')
+    else:
+        print("Using initial firmware credentials")
+        return os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD')
+
+def ssh_connect_with_shell(ip, username=None, password=None, timeout=10):
     """Connect to device via SSH and return client and channel"""
     print(f"Connecting to {ip} via SSH...")
+    
+    # If credentials not provided, determine them based on IP
+    if username is None or password is None:
+        username, password = get_ssh_credentials(ip)
     
     # Create SSH client
     client = paramiko.SSHClient()
@@ -131,9 +146,13 @@ def ssh_connect_with_shell(ip, username, password, timeout=10):
         print(f"Error connecting to {ip}: {e}")
         return None, None
 
-def retry_ssh_connect(ip, username, password, max_attempts=5, retry_delay=10):
+def retry_ssh_connect(ip, username=None, password=None, max_attempts=10, retry_delay=10):
     """Attempt to connect via SSH with multiple retries"""
     print(f"Attempting to connect to {ip} via SSH (max {max_attempts} attempts)...")
+    
+    # If credentials not provided, determine them based on IP
+    if username is None or password is None:
+        username, password = get_ssh_credentials(ip)
     
     for attempt in range(1, max_attempts + 1):
         print(f"\nAttempt {attempt}/{max_attempts}...")
@@ -191,6 +210,23 @@ def execute_ssh_command(channel, command, wait_time=5, max_output_wait=30):
     
     return output_str
 
+def safe_close_ssh_connection(ssh_client, channel):
+    """Safely close SSH connection and channel"""
+    if channel:
+        try:
+            channel.close()
+        except:
+            pass
+    
+    if ssh_client:
+        try:
+            ssh_client.close()
+        except:
+            pass
+    
+    # Give time for connection to fully terminate
+    time.sleep(2)
+
 def monitor_upgrade_progress(channel, timeout=300):
     """Monitor the upgrade process until completion or timeout"""
     print("\n----- Monitoring Upgrade Progress -----")
@@ -246,8 +282,8 @@ def discover_devices(network_prefix="192.168.1", start=1, end=254, timeout=1):
         ip = f"{network_prefix}.{i}"
         print(f"Checking {ip}...", end="\r")
         
-        # Try to connect via SSH
-        ssh_client, channel = ssh_connect_with_shell(ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'), timeout=timeout)
+        # Try to connect via SSH with automatic credential selection
+        ssh_client, channel = ssh_connect_with_shell(ip, timeout=timeout)
         if ssh_client and channel:
             # Verify it's an ADTRAN device by checking for specific commands
             output = execute_ssh_command(channel, "show version")
@@ -268,11 +304,20 @@ def batch_upgrade_devices(devices, computer_ip, firmware_filename):
         upgrade_results[ip] = {"status": "failed", "message": ""}
         
         try:
-            # Connect to device
-            ssh_client, channel = ssh_connect_with_shell(ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'))
+            # Connect to device with automatic credential selection
+            ssh_client, channel = ssh_connect_with_shell(ip)
             if not ssh_client or not channel:
                 upgrade_results[ip]["message"] = "Failed to connect to device"
                 continue
+            
+            # Execute system restore nvram command to clear RAM before upgrade
+            print(f"\nExecuting system restore nvram command for {ip} to clear RAM...")
+            output = execute_ssh_command(channel, "system restore nvram")
+            
+            # Monitor for confirmation prompt
+            if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
+                print(f"Confirmation prompt detected for {ip}. Sending 'y'...")
+                output = execute_ssh_command(channel, "y")
             
             # Execute upgrade command
             upgrade_url = f"http://{computer_ip}:8000/{firmware_filename}"
@@ -282,11 +327,6 @@ def batch_upgrade_devices(devices, computer_ip, firmware_filename):
             if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
                 print(f"Confirmation prompt detected for {ip}. Sending 'y'...")
                 output = execute_ssh_command(channel, "y")
-                
-                # Check for second confirmation
-                if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
-                    print(f"Second confirmation prompt detected for {ip}. Sending 'y'...")
-                    output = execute_ssh_command(channel, "y")
             
             # Monitor the upgrade progress
             print(f"\nStarting to monitor upgrade progress for {ip}...")
@@ -304,8 +344,18 @@ def batch_upgrade_devices(devices, computer_ip, firmware_filename):
                 print(f"⚠ Upgrade completion confirmation not received for {ip}")
                 upgrade_results[ip]["message"] = "Upgrade completion not confirmed"
             
-            # Close SSH connection as device will reboot
-            ssh_client.close()
+            # Execute system restore default command
+            print("\nExecuting system restore default command...")
+            output = execute_ssh_command(channel, "system restore default")
+            
+            # Monitor for confirmation prompt
+            if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
+                print("Confirmation prompt detected. Sending 'y'...")
+                output = execute_ssh_command(channel, "y")
+            
+            # Safely close SSH connection before device reboots
+            print("\nSafely closing SSH connection...")
+            safe_close_ssh_connection(ssh_client, channel)
             
             # Wait for device to reboot and get new IP
             print(f"\nWaiting for device {ip} to reboot...")
@@ -328,7 +378,7 @@ def batch_upgrade_devices(devices, computer_ip, firmware_filename):
                 time.sleep(30)
                 
                 # Connect to upgraded device
-                ssh_client, channel = retry_ssh_connect(new_ip, os.getenv('UPGRADED_USERNAME'), os.getenv('UPGRADED_PASSWORD'))
+                ssh_client, channel = retry_ssh_connect(new_ip)
                 if ssh_client and channel:
                     extract_device_info(ssh_client, channel, new_ip)
                     ssh_client.close()
@@ -399,7 +449,7 @@ def main():
             # Extract information from all devices
             for ip in devices:
                 print(f"\n===== PROCESSING DEVICE {ip} =====")
-                ssh_client, channel = retry_ssh_connect(ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'))
+                ssh_client, channel = retry_ssh_connect(ip)
                 if ssh_client and channel:
                     extract_device_info(ssh_client, channel, ip)
                     ssh_client.close()
@@ -506,11 +556,20 @@ def main():
         print("\n===== STEP 3: UPGRADING FIRMWARE =====")
         print(f"Connecting to device at {device_ip}...")
         
-        # SSH connection with interactive shell
-        ssh_client, channel = ssh_connect_with_shell(device_ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'))
+        # SSH connection with interactive shell and automatic credential selection
+        ssh_client, channel = ssh_connect_with_shell(device_ip)
         if not ssh_client or not channel:
             print("Failed to connect to device. Please check the connection and try again.")
             return
+        
+        # Execute system restore nvram command to clear RAM before upgrade
+        print("\nExecuting system restore nvram command to clear RAM...")
+        output = execute_ssh_command(channel, "system restore nvram")
+        
+        # Monitor for confirmation prompt
+        if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
+            print("Confirmation prompt detected. Sending 'y'...")
+            output = execute_ssh_command(channel, "y")
         
         # Execute upgrade command
         upgrade_url = f"http://{computer_ip}:8000/{firmware_filename}"
@@ -518,13 +577,8 @@ def main():
         
         # Monitor for confirmation prompt
         if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
-            print("Confirmation prompt detected. Sending 'y'...")
+            print("Second confirmation prompt detected. Sending 'y'...")
             output = execute_ssh_command(channel, "y")
-            
-            # Check for second confirmation
-            if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
-                print("Second confirmation prompt detected. Sending 'y'...")
-                output = execute_ssh_command(channel, "y")
         
         # Monitor the upgrade progress
         print("\nStarting to monitor upgrade progress...")
@@ -541,17 +595,23 @@ def main():
             print("⚠ Upgrade completion confirmation not received")
             print("The upgrade may still be in progress or may have failed.")
         
-        # Close SSH connection as device will reboot
-        ssh_client.close()
+        # Execute system restore default command
+        print("\nExecuting system restore default command...")
+        output = execute_ssh_command(channel, "system restore default")
         
-        # Instructions for reset and reboot
-        print("\n===== STEP 4: WAIT FOR UPGRADE AND RESET =====")
-        print("The device should now be flashing the firmware and will reboot when done.")
-        print("Please monitor the device's indicator lights:")
-        print("1. Wait for the status light to blink blue/green (indicating it's ready)")
-        print("2. Then press and hold the RESET button until the blue indicator light blinks")
-        print("3. Wait for the indicator light to flash green again")
-        input("Press Enter when this process is complete...\n")
+        # Monitor for confirmation prompt
+        if "confirm" in output.lower() or "proceed" in output.lower() or "y/n" in output.lower():
+            print("Confirmation prompt detected. Sending 'y'...")
+            output = execute_ssh_command(channel, "y")
+        
+        # Safely close SSH connection before device reboots
+        print("\nSafely closing SSH connection...")
+        safe_close_ssh_connection(ssh_client, channel)
+        
+        # Instructions for waiting for reboot
+        print("\n===== STEP 4: WAITING FOR DEVICE REBOOT =====")
+        print("The device is now performing a system restore and will reboot automatically.")
+        print("Please wait while the device completes this process...")
         
         # Prompt for new device IP
         print("\n===== STEP 5: CONNECT TO UPGRADED DEVICE =====")
@@ -569,7 +629,7 @@ def main():
             
             # Connect to upgraded device with retries
             print(f"\nConnecting to upgraded device at {new_device_ip}...")
-            ssh_client, channel = retry_ssh_connect(new_device_ip, os.getenv('UPGRADED_USERNAME'), os.getenv('UPGRADED_PASSWORD'), max_attempts=5, retry_delay=15)
+            ssh_client, channel = retry_ssh_connect(new_device_ip)
             
             if ssh_client and channel:
                 extract_device_info(ssh_client, channel, new_device_ip)
@@ -587,8 +647,8 @@ def main():
         print("\n===== EXTRACTING DEVICE INFORMATION =====")
         print(f"Connecting to device at {device_ip}...")
         
-        # Connect to device with retries
-        ssh_client, channel = retry_ssh_connect(device_ip, os.getenv('INITIAL_USERNAME'), os.getenv('INITIAL_PASSWORD'), max_attempts=5, retry_delay=15)
+        # Connect to device with retries and automatic credential selection
+        ssh_client, channel = retry_ssh_connect(device_ip, max_attempts=5, retry_delay=15)
         
         if ssh_client and channel:
             extract_device_info(ssh_client, channel, device_ip)
@@ -645,16 +705,35 @@ def extract_device_info(ssh_client, channel, device_ip):
         print(f"Serial Number: {serial}")
         print(f"MAC Address: {mac}")
     
-    # Save the information to a file
-    device_info_file = f"device_info_{device_ip.replace('.', '_')}.txt"
+    # Get firmware build information
+    print("\nRetrieving firmware build information...")
+    build_output = execute_ssh_command(channel, "show buildinfo")
+    
+    # Extract firmware description
+    firmware_version = ""
+    if build_output:
+        for line in build_output.split('\n'):
+            if "DISTRIB_DESCRIPTION" in line:
+                firmware_version = line.split("=")[1].strip().strip("'")
+                print(f"Firmware Version: {firmware_version}")
+    
+    # Save the information to a CSV file
+    csv_file = "device_upgrades.csv"
+    file_exists = os.path.isfile(csv_file)
+    
     try:
-        with open(device_info_file, 'w') as f:
-            f.write(f"Device IP: {device_ip}\n")
-            f.write(f"WiFi SSID: {ssid}\n")
-            f.write(f"WiFi Password: {wifi_key}\n")
-            f.write(f"Serial Number: {serial}\n")
-            f.write(f"MAC Address: {mac}\n")
-        print(f"\nDevice information saved to {device_info_file}")
+        with open(csv_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            # Write header if file is new
+            if not file_exists:
+                writer.writerow(['Timestamp', 'Device IP', 'WiFi SSID', 'WiFi Password', 'Serial Number', 'MAC Address', 'Firmware Version', 'Operation Type'])
+            
+            # Write device information
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            operation_type = "Upgrade" if "upgrade" in sys.argv else "Info Only"
+            writer.writerow([timestamp, device_ip, ssid, wifi_key, serial, mac, firmware_version, operation_type])
+            
+        print(f"\nDevice information appended to {csv_file}")
     except Exception as e:
         print(f"Error saving device information: {e}")
 

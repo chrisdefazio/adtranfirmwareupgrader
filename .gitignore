@@ -31,4 +31,10 @@ ENV/
 .idea/
 .vscode/
 *.swp
-*.swo 
+*.swo
+
+# Output Files
+device_upgrades.csv
+
+# Firmware Files
+firmware_images/
