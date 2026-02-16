@@ -7,7 +7,7 @@ Allows users to select between ADTRAN and COMTREND firmware upgrade tools.
 import sys
 from simple_term_menu import TerminalMenu
 
-from network_utils import drain_tty_input
+from network_utils import drain_tty_input, reset_tty_sane
 
 
 def main():
@@ -48,7 +48,10 @@ def main():
             except Exception as e:
                 print(f"Error running COMTREND firmware upgrader: {e}")
 
-        # After a script completes, ask if user wants to return to menu or exit
+        # Flush output and reset terminal before next menu to avoid lag
+        sys.stdout.flush()
+        sys.stderr.flush()
+        reset_tty_sane()
         return_options = ["Yes", "No"]
         return_menu = TerminalMenu(return_options, title="Return to main menu?")
         return_index = return_menu.show()

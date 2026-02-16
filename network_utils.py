@@ -5,29 +5,47 @@ import platform
 import select
 import subprocess
 import time
-import threading
 
 
 def drain_tty_input():
     """Drain any leftover bytes from the terminal after a menu closes.
     Some terminals send \\r\\n for Enter; the menu consumes \\r and the next menu
     reads the leftover \\n (e.g. as 'move down'), causing a double-enter feel.
-    Call this after each TerminalMenu.show() to avoid that."""
+    Call this after each TerminalMenu.show() to avoid that.
+    Uses a short timeout and chunk reads to avoid adding noticeable lag."""
     if platform.system() == "Windows":
         return
     try:
         tty = open("/dev/tty", "rb")
         try:
             tty_fd = tty.fileno()
-            while True:
-                r, _, _ = select.select([tty_fd], [], [], 0.05)
+            deadline = time.time() + 0.15  # drain at most ~150ms so we don't add lag
+            while time.time() < deadline:
+                r, _, _ = select.select([tty_fd], [], [], 0.01)  # 10ms timeout when empty
                 if not r:
                     break
-                if tty.read(1) == b"":
+                chunk = tty.read(256)
+                if not chunk:
                     break
         finally:
             tty.close()
     except (OSError, AttributeError):
+        pass
+
+
+def reset_tty_sane():
+    """Reset the terminal to sane defaults (cooked mode, echo on, etc.).
+    Call after returning from code that may have left the terminal in a bad
+    state (e.g. SSH session, subprocess, or heavy output)."""
+    if platform.system() == "Windows":
+        return
+    try:
+        subprocess.run(
+            ["stty", "sane"],
+            capture_output=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
 
@@ -172,22 +190,35 @@ def get_wired_interface_ip():
 def wait_for_ethernet_connection(timeout=300, interval=3):
     """Poll for a wired Ethernet interface with IPv4. Allows switching to manual mode during wait.
     Returns (iface_name, ip) when detected, or None on timeout or if user switches to manual."""
-    manual_requested = [False]
-
-    def wait_for_manual_key():
+    def manual_switch_requested(tty_file):
+        """Non-blocking check for Enter key to switch to manual mode."""
+        if tty_file is None:
+            return False
         try:
-            input("\nPress Enter to switch to manual interface selection... ")
-            manual_requested[0] = True
-        except (EOFError, KeyboardInterrupt):
-            manual_requested[0] = True
+            while True:
+                r, _, _ = select.select([tty_file.fileno()], [], [], 0)
+                if not r:
+                    return False
+                chunk = tty_file.read(256)
+                if not chunk:
+                    return False
+                if b"\n" in chunk or b"\r" in chunk:
+                    return True
+        except (OSError, ValueError):
+            return False
 
-    t = threading.Thread(target=wait_for_manual_key, daemon=True)
-    t.start()
+    tty_file = None
+    if platform.system() != "Windows":
+        try:
+            tty_file = open("/dev/tty", "rb")
+        except OSError:
+            tty_file = None
+
     start_time = time.time()
     last_status = 0
     try:
         while time.time() - start_time < timeout:
-            if manual_requested[0]:
+            if manual_switch_requested(tty_file):
                 return None
             result = get_wired_interface_ip()
             if result:
@@ -198,7 +229,11 @@ def wait_for_ethernet_connection(timeout=300, interval=3):
                 last_status = elapsed
             time.sleep(interval)
     finally:
-        manual_requested[0] = True
+        if tty_file is not None:
+            try:
+                tty_file.close()
+            except OSError:
+                pass
     return None
 
 
