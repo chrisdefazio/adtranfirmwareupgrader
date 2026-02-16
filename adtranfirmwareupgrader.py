@@ -15,6 +15,15 @@ import csv
 from datetime import datetime
 from simple_term_menu import TerminalMenu
 
+from network_utils import (
+    drain_tty_input,
+    get_gateway_for_connection,
+    get_network_interfaces,
+    get_wired_interface_ip,
+    wait_for_ethernet_connection,
+    wait_for_ping,
+)
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -53,326 +62,6 @@ def clear_ssh_key(ip):
     else:
         run_command(f"ssh-keygen -R {ip}")
         print(f"Cleared SSH key for {ip}")
-
-def get_os_type():
-    """Return the current OS for platform-specific logic: Darwin, Linux, or Windows."""
-    return platform.system()
-
-def _get_wired_interface_ip_darwin():
-    """Detect a wired (Ethernet/USB LAN) interface with IPv4 on macOS. Returns (iface_name, ip) or None."""
-    try:
-        output = subprocess.run(
-            ["networksetup", "-listallhardwareports"],
-            capture_output=True, text=True, timeout=5
-        )
-        if output.returncode != 0:
-            return None
-        # Parse "Hardware Port: ..." and "Device: enX" for Ethernet-like ports
-        lines = output.stdout.splitlines()
-        i = 0
-        devices_to_try = []
-        while i < len(lines):
-            line = lines[i]
-            if "Hardware Port:" in line:
-                port_name = line.split("Hardware Port:")[-1].strip()
-                # Consider Ethernet, USB LAN, etc. (exclude Wi-Fi, Bluetooth)
-                if any(x in port_name for x in ("Ethernet", "LAN", "Thunderbolt")) and "Wi-Fi" not in port_name and "Bluetooth" not in port_name:
-                    i += 1
-                    while i < len(lines) and lines[i].strip().startswith("Device:"):
-                        dev_line = lines[i]
-                        dev = dev_line.split("Device:")[-1].strip()
-                        if dev:
-                            devices_to_try.append((port_name, dev))
-                        i += 1
-                    continue
-            i += 1
-        for port_name, dev in devices_to_try:
-            ip_out = subprocess.run(
-                ["ipconfig", "getifaddr", dev],
-                capture_output=True, text=True, timeout=2
-            )
-            if ip_out.returncode == 0 and ip_out.stdout.strip():
-                ip = ip_out.stdout.strip()
-                if ip and not ip.startswith("127."):
-                    return (port_name, ip)
-        # Fallback: ifconfig for inet on en* interfaces
-        out = subprocess.run(
-            "ifconfig | grep -A 2 '^en' | grep 'inet '",
-            shell=True, capture_output=True, text=True, timeout=5
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            for line in out.stdout.strip().splitlines():
-                parts = line.strip().split()
-                if len(parts) >= 2 and parts[0] == "inet":
-                    ip = parts[1]
-                    if not ip.startswith("127."):
-                        iface = "enX"  # generic
-                        return (iface, ip)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-    return None
-
-def _get_wired_interface_ip_linux():
-    """Detect a wired interface with IPv4 on Linux. Returns (iface_name, ip) or None."""
-    try:
-        out = subprocess.run(
-            ["ip", "-4", "-o", "addr", "show"],
-            capture_output=True, text=True, timeout=5
-        )
-        if out.returncode != 0:
-            return None
-        for line in out.stdout.splitlines():
-            # Skip loopback
-            if "lo" in line.split()[1]:
-                continue
-            parts = line.split()
-            if len(parts) >= 4 and parts[2] == "inet":
-                # interface name has colon: eth0:2 -> eth0
-                iface = parts[1].rstrip(":")
-                ip_cidr = parts[3]
-                ip = ip_cidr.split("/")[0]
-                if not ip.startswith("127."):
-                    return (iface, ip)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-    try:
-        out = subprocess.run(
-            "ifconfig | grep -E '^[a-z]' | grep -v lo",
-            shell=True, capture_output=True, text=True, timeout=5
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            blocks = out.stdout.strip().split("\n\n")
-            for block in blocks:
-                lines = block.split("\n")
-                iface = lines[0].split(":")[0].strip()
-                for line in lines[1:]:
-                    if "inet " in line and "127." not in line:
-                        parts = line.strip().split()
-                        for i, p in enumerate(parts):
-                            if p == "inet" and i + 1 < len(parts):
-                                ip = parts[i + 1]
-                                if "/" in ip:
-                                    ip = ip.split("/")[0]
-                                return (iface, ip)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return None
-
-def _get_wired_interface_ip_windows():
-    """Detect a wired Ethernet adapter with IPv4 on Windows. Returns (adapter_name, ip) or None."""
-    try:
-        output = subprocess.run(
-            "ipconfig",
-            shell=True, capture_output=True, text=True, timeout=10
-        )
-        if output.returncode != 0:
-            return None
-        lines = output.stdout.splitlines()
-        current_adapter = None
-        for line in lines:
-            if line.strip() and ":" in line and not line.strip().startswith(" "):
-                # Adapter name line (e.g. "Ethernet adapter Ethernet:")
-                current_adapter = line.split(":")[0].strip()
-            if current_adapter and "IPv4 Address" in line:
-                # Exclude virtual/vpn/bluetooth
-                if any(x in current_adapter for x in ("Virtual", "VPN", "Bluetooth", "Loopback")):
-                    continue
-                if any(x in current_adapter for x in ("Ethernet", "LAN", "Local Area")):
-                    ip = line.split(":")[-1].strip()
-                    if ip and not ip.startswith("127."):
-                        return (current_adapter, ip)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return None
-
-def get_wired_interface_ip():
-    """Return (iface_name, ip) for a wired interface with IPv4 on current OS, or None."""
-    os_type = get_os_type()
-    if os_type == "Darwin":
-        return _get_wired_interface_ip_darwin()
-    if os_type == "Linux":
-        return _get_wired_interface_ip_linux()
-    if os_type == "Windows":
-        return _get_wired_interface_ip_windows()
-    return None
-
-def wait_for_ethernet_connection(timeout=300, interval=3):
-    """Poll for a wired Ethernet interface with IPv4. Allows switching to manual mode during wait.
-    Returns (iface_name, ip) when detected, or None on timeout or if user switches to manual."""
-    manual_requested = [False]  # list so closure can mutate
-
-    def wait_for_manual_key():
-        try:
-            input("\nPress Enter to switch to manual interface selection... ")
-            manual_requested[0] = True
-        except (EOFError, KeyboardInterrupt):
-            manual_requested[0] = True
-
-    t = threading.Thread(target=wait_for_manual_key, daemon=True)
-    t.start()
-    start_time = time.time()
-    last_status = 0
-    try:
-        while time.time() - start_time < timeout:
-            if manual_requested[0]:
-                return None
-            result = get_wired_interface_ip()
-            if result:
-                return result
-            elapsed = int(time.time() - start_time)
-            if elapsed >= last_status + interval or last_status == 0:
-                print(f"Waiting for Ethernet connection... ({elapsed}s)")
-                last_status = elapsed
-            time.sleep(interval)
-    finally:
-        manual_requested[0] = True  # allow input thread to exit if still waiting
-    return None
-
-def get_gateway_for_connection(iface_name=None, computer_ip=None):
-    """Get the default gateway (router) for the given interface or computer IP.
-    Returns gateway IP string or None. Used to suggest the device/gateway address."""
-    os_type = get_os_type()
-    if os_type == "Darwin":
-        if iface_name:
-            # Port name (e.g. "USB 10/100/1000 LAN") -> networksetup -getinfo
-            if " " in iface_name or "LAN" in iface_name or "Ethernet" in iface_name:
-                try:
-                    out = subprocess.run(
-                        ["networksetup", "-getinfo", iface_name],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    if out.returncode == 0:
-                        for line in out.stdout.splitlines():
-                            if line.strip().startswith("Router:"):
-                                gw = line.split("Router:")[-1].strip()
-                                if gw and gw != "(none)":
-                                    return gw
-                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                    pass
-            # Device name (e.g. en5) -> netstat and match interface
-            try:
-                out = subprocess.run(
-                    "netstat -nr -f inet",
-                    shell=True, capture_output=True, text=True, timeout=5
-                )
-                if out.returncode == 0:
-                    for line in out.stdout.splitlines():
-                        parts = line.split()
-                        if len(parts) >= 2 and parts[0] == "default" and len(parts) >= 6 and parts[-1] == iface_name:
-                            return parts[1]
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-        if computer_ip:
-            try:
-                out = subprocess.run(
-                    "netstat -nr -f inet",
-                    shell=True, capture_output=True, text=True, timeout=5
-                )
-                if out.returncode == 0:
-                    for line in out.stdout.splitlines():
-                        parts = line.split()
-                        if len(parts) >= 2 and parts[0] == "default":
-                            return parts[1]
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-    if os_type == "Linux":
-        if iface_name:
-            try:
-                out = subprocess.run(
-                    ["ip", "route", "show", "dev", iface_name],
-                    capture_output=True, text=True, timeout=5
-                )
-                if out.returncode == 0:
-                    for line in out.stdout.splitlines():
-                        if "default" in line and "via" in line:
-                            for i, p in enumerate(line.split()):
-                                if p == "via" and i + 1 < len(line.split()):
-                                    return line.split()[i + 1]
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                pass
-        if computer_ip:
-            try:
-                out = subprocess.run(
-                    ["ip", "route", "show", "default"],
-                    capture_output=True, text=True, timeout=5
-                )
-                if out.returncode == 0 and out.stdout.strip():
-                    parts = out.stdout.strip().split()
-                    if "via" in parts:
-                        idx = parts.index("via")
-                        if idx + 1 < len(parts):
-                            return parts[idx + 1]
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                pass
-    if os_type == "Windows":
-        try:
-            out = subprocess.run(
-                "ipconfig",
-                shell=True, capture_output=True, text=True, timeout=10
-            )
-            if out.returncode != 0:
-                return None
-            lines = out.stdout.splitlines()
-            current_ip = None
-            for line in lines:
-                # New adapter section (no leading space)
-                if line.strip() and not line.startswith(" ") and ":" in line:
-                    current_ip = None
-                if "IPv4 Address" in line and ":" in line:
-                    current_ip = line.split(":")[-1].strip()
-                if current_ip and "Default Gateway" in line and ":" in line:
-                    gw = line.split(":")[-1].strip()
-                    if gw and (computer_ip is None or current_ip == computer_ip):
-                        return gw
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-    return None
-
-def get_network_interfaces():
-    """Get network interfaces and their IP addresses"""
-    if platform.system() == "Windows":
-        output = run_command("ipconfig")
-        # Simple parsing for Windows ipconfig output
-        interfaces = []
-        current_if = None
-        for line in output.split('\n'):
-            if ':' in line and not 'IPv' in line:
-                current_if = line.split(':')[0].strip()
-            if 'IPv4 Address' in line and current_if:
-                ip = line.split(':')[1].strip()
-                interfaces.append((current_if, ip))
-        return interfaces
-    else:
-        # For Unix-like systems
-        output = run_command("ifconfig | grep 'inet ' | grep -v 127.0.0.1")
-        interfaces = []
-        for line in output.split('\n'):
-            if line.strip():
-                # Extract interface and IP address
-                parts = line.strip().split()
-                ip = parts[1]
-                iface = line.split(':')[0] if ':' in line else "unknown"
-                interfaces.append((iface, ip))
-        return interfaces
-
-def wait_for_ping(ip, timeout=300, interval=5):
-    """Wait for device to respond to ping"""
-    print(f"Waiting for device {ip} to respond to ping...")
-    start_time = time.time()
-    
-    ping_cmd = "ping -n 1 " if platform.system().lower() == "windows" else "ping -c 1 "
-    
-    while time.time() - start_time < timeout:
-        response = os.system(ping_cmd + ip + " > nul" if platform.system().lower() == "windows" else " > /dev/null")
-        if response == 0:
-            print(f"Device {ip} is responding to ping!")
-            return True
-            
-        time.sleep(interval)
-        print(f"Still waiting for device {ip}... ({int(time.time() - start_time)}s elapsed)")
-    
-    print(f"Timeout waiting for device {ip} to respond to ping")
-    return False
 
 def get_ssh_credentials(ip):
     """Determine which SSH credentials to use based on IP address"""
@@ -678,13 +367,6 @@ def monitor_upgrade_progress(channel, timeout=300):
     
     return download_started, upgrade_complete, last_output
 
-def check_firmware_received(server_log):
-    """Check if the firmware file was received by the HTTP server"""
-    for line in server_log.getvalue().split("\n"):
-        if "GET" in line and "200" in line:
-            return True
-    return False
-
 def main():
     # Check for paramiko library
     try:
@@ -695,19 +377,23 @@ def main():
         return
     
     # Ask user what they want to do
-    print("\n===== ADTRAN DEVICE UTILITY =====")
-    print("1. Upgrade firmware and extract device information")
-    print("2. Extract device information only (no upgrade)")
-    choice = input("\nSelect an option (1 or 2): ")
-    
-    if choice not in ["1", "2"]:
-        print("Invalid choice. Please select 1 or 2.")
+    operation_options = [
+        "Upgrade firmware and extract device information",
+        "Extract device information only (no upgrade)",
+    ]
+    operation_menu = TerminalMenu(operation_options, title="ADTRAN DEVICE UTILITY")
+    choice_index = operation_menu.show()
+    drain_tty_input()
+    if choice_index is None:
+        print("Cancelled.")
         return
+    choice = "1" if choice_index == 0 else "2"
 
     # Connection mode: Auto Detect or Manual (select at start; can switch to manual during auto-detect)
     mode_options = ["Auto Detect (recommended)", "Manual"]
     mode_menu = TerminalMenu(mode_options, title="Connection mode:")
     mode_index = mode_menu.show()
+    drain_tty_input()
     if mode_index is None:
         print("Cancelled.")
         return
@@ -719,7 +405,7 @@ def main():
         selection_options = ["Select from firmware_images directory", "Enter custom file path"]
         selection_menu = TerminalMenu(selection_options, title="Choose firmware source:")
         selection_index = selection_menu.show()
-        
+        drain_tty_input()
         if selection_index is None:
             print("Firmware selection cancelled.")
             return
@@ -746,7 +432,7 @@ def main():
             print(f"\nSelect a firmware file from {firmware_images_dir}:")
             firmware_menu = TerminalMenu(firmware_files, title="")
             firmware_index = firmware_menu.show()
-            
+            drain_tty_input()
             if firmware_index is None:
                 print("Firmware selection cancelled.")
                 return
@@ -799,16 +485,14 @@ def main():
             input("Press Enter when the device is ready to continue...\n")
         # Display network interfaces and prompt for computer IP (manual or fallback)
         print("\n===== STEP 2: CONFIRM NETWORK CONNECTION =====")
-        print("Available network interfaces:")
         interfaces = get_network_interfaces()
-        for i, (iface, ip) in enumerate(interfaces):
-            print(f"{i+1}. {iface}: {ip}")
-        idx = -1
-        while idx < 0 or idx >= len(interfaces):
-            try:
-                idx = int(input(f"Select the interface connected to the device (1-{len(interfaces)}): ")) - 1
-            except ValueError:
-                print("Please enter a valid number")
+        interface_options = [f"{iface}: {ip}" for (iface, ip) in interfaces]
+        interface_menu = TerminalMenu(interface_options, title="Select the interface connected to the device")
+        idx = interface_menu.show()
+        drain_tty_input()
+        if idx is None:
+            print("Cancelled.")
+            return
         selected_iface = interfaces[idx][0]
         computer_ip = interfaces[idx][1]
     print(f"Using computer IP: {computer_ip}")
@@ -819,8 +503,11 @@ def main():
     if gateway:
         default_device_ip = gateway
         print(f"Detected gateway address: {default_device_ip}")
-    # Prompt for device IP
-    device_ip = input(f"\nEnter the device IP address (default: {default_device_ip}): ") or default_device_ip
+    if auto_detect_mode and gateway:
+        device_ip = default_device_ip
+        print(f"Using device IP: {device_ip}")
+    else:
+        device_ip = input(f"\nEnter the device IP address (default: {default_device_ip}): ") or default_device_ip
     
     # Clear SSH key for device IP
     clear_ssh_key(device_ip)
